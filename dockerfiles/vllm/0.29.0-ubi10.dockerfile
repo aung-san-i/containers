@@ -32,28 +32,6 @@ LABEL image.vllm.version=0.29.0
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ########################################
-# Extra repositories
-########################################
-
-# Needed for ffmpeg, which RHEL does not ship (RPM Fusion supplies it) and which
-# pulls build dependencies from EPEL. ffmpeg is not optional here: vLLM 0.29.0
-# lists torchcodec in requirements/xpu.txt, and torchcodec links against the
-# FFmpeg shared libraries at import time.
-#
-# epel-release is not in the UBI repositories, so it is installed from its URL.
-# CodeReady Builder is called "crb" on RHEL/Rocky but
-# "ubi-10-codeready-builder-rpms" on UBI, and may already be enabled; enabling
-# it is therefore best-effort.
-RUN set -xe && \
-    dnf install -y "https://dl.fedoraproject.org/pub/epel/epel-release-latest-$(rpm -E %rhel).noarch.rpm" && \
-    { dnf config-manager setopt crb.enabled=1 || \
-      dnf config-manager setopt ubi-10-codeready-builder-rpms.enabled=1 || \
-      dnf config-manager --set-enabled crb || true; } && \
-    dnf install -y "https://mirrors.rpmfusion.org/free/el/rpmfusion-free-release-$(rpm -E %rhel).noarch.rpm" && \
-    dnf clean all && \
-    rm -rf /var/cache/dnf
-
-########################################
 # Install Python and create a virtual environment
 ########################################
 
@@ -82,8 +60,12 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install --upgrade pip setupto
 #   libaio-dev  -> libaio-devel
 # lsb-release is intentionally omitted: RHEL 10 no longer ships LSB packages.
 # git and wget already come from the compute-runtime base of this image.
+# No FFmpeg is installed: vLLM 0.29.0 defaults its video backend to opencv, whose
+# wheel bundles FFmpeg. UBI 10 ships no FFmpeg at all, and RPM Fusion's EL10 build
+# is unsatisfiable there (needs libSDL2, libvpx, snappy, speex, libvdpau, ... none
+# of which exist in the UBI repo set). That is also why no extra repositories
+# (EPEL / CRB / RPM Fusion) are enabled in this file.
 RUN dnf install -y \
-        ffmpeg-libs \
         libsndfile \
         libSM \
         libXext \
@@ -93,20 +75,10 @@ RUN dnf install -y \
     dnf clean all && \
     rm -rf /var/cache/dnf
 
-# This Intel(R) oneAPI Collective Communications Library (oneCCL) contains several enhancements for Intel(R) Arc(TM) Pro graphics
-# For details, please refer to https://github.com/uxlfoundation/oneCCL/releases/tag/2021.15.9
-ARG ONECCL_INSTALLER="intel-oneccl-2021.15.9.14_offline.sh"
-ARG ONECCL_INSTALLER_SHA256="f7ab81b6ed1b10dd35fadec366a78046d8af214888dfd625047ce8953d5aa4ef"
-RUN wget --progress=dot:giga "https://github.com/uxlfoundation/oneCCL/releases/download/2021.15.9/${ONECCL_INSTALLER}" && \
-    printf "%s  %s\n" "${ONECCL_INSTALLER_SHA256}" "${ONECCL_INSTALLER}" > /tmp/oneccl.sha256 && \
-    sha256sum -c /tmp/oneccl.sha256 && \
-    rm -f /tmp/oneccl.sha256 && \
-    bash "${ONECCL_INSTALLER}" -a --silent --eula accept && \
-    rm "${ONECCL_INSTALLER}" && \
-    echo "source /opt/intel/oneapi/setvars.sh --force" >> /root/.bashrc && \
-    echo "source /opt/intel/oneapi/ccl/2021.15/env/vars.sh --force" >> /root/.bashrc && \
-    rm -f /opt/intel/oneapi/ccl/latest && \
-    ln -s /opt/intel/oneapi/ccl/2021.15 /opt/intel/oneapi/ccl/latest
+# No manual oneCCL install here. torch 2.13.0+xpu pins oneccl==2022.0.0 (built for
+# oneAPI 2026, libsycl.so.9) and links libccl.so.1 directly. Installing oneCCL
+# 2021.15.9 and then removing the bundled one -- as 0.21.0-llmscaler-* does -- breaks
+# torch import: that build needs libsycl.so.8, which no longer exists in this stack.
 
 ########################################
 # Install vLLM
@@ -125,9 +97,7 @@ WORKDIR /opt/vllm
 RUN --mount=type=cache,target=/root/.cache/pip \
     git checkout v${VLLM_VERSION} && \
     pip install -v -r requirements/xpu.txt && \
-    VLLM_TARGET_DEVICE=xpu pip install --no-build-isolation -e . -v && \
-    # remove PyTorch bundled oneCCL to avoid conflicts with the oneCCL installed above
-    pip uninstall -y oneccl oneccl-devel
+    VLLM_TARGET_DEVICE=xpu pip install --no-build-isolation -e . -v
 
 ENV VLLM_TARGET_DEVICE=xpu
 # XPU workers must not fork; spawn is required for multi-GPU tensor parallelism.
