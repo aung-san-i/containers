@@ -83,7 +83,7 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install --upgrade pip setupto
 # lsb-release is intentionally omitted: RHEL 10 no longer ships LSB packages.
 # git and wget already come from the compute-runtime base of this image.
 RUN dnf install -y \
-        ffmpeg \
+        ffmpeg-libs \
         libsndfile \
         libSM \
         libXext \
